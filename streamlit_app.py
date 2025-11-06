@@ -1,3 +1,13 @@
+emergency-dashboard/
+├── app/
+│   └── streamlit_app.py          ← Streamlit 코드
+├── fetch_data.py                 ← 데이터 수집 코드
+├── data/
+│   └── cached_data.csv
+├── .github/
+│   └── workflows/
+│       └── update_data.yml       ← 여기에 YAML 넣기!
+
 import requests
 import pandas as pd
 import os
