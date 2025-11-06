@@ -2,38 +2,45 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="한국 병원 현황 대시보드", layout="wide")
+st.set_page_config(page_title="한국 코로나19 확진자 대시보드", layout="wide")
 
-st.title("🏥 한국 병원 현황 대시보드")
+st.title("🦠 한국 코로나19 확진자 추이 대시보드")
+
+# ✅ 인터넷 CSV URL (예시: 질병관리청 공개데이터)
+DATA_URL = "https://raw.githubusercontent.com/datasets/covid-19/main/data/countries-aggregated.csv"
 
 @st.cache_data
-def load_data():
-    return pd.read_csv("hospitals.csv")
+def load_data(url):
+    df = pd.read_csv(url)
+    return df[df["Country"] == "Korea, South"]
 
-df = load_data()
+df = load_data(DATA_URL)
+
+# 날짜 형식 변환
+df["Date"] = pd.to_datetime(df["Date"])
 
 # 사이드바 필터
-cities = st.sidebar.multiselect("도시 선택", df["city"].unique(), default=df["city"].unique())
-types = st.sidebar.multiselect("병원 유형 선택", df["type"].unique(), default=df["type"].unique())
+start_date = st.sidebar.date_input("시작 날짜", df["Date"].min())
+end_date = st.sidebar.date_input("종료 날짜", df["Date"].max())
 
-filtered = df[df["city"].isin(cities) & df["type"].isin(types)]
+filtered = df[(df["Date"] >= pd.to_datetime(start_date)) & (df["Date"] <= pd.to_datetime(end_date))]
 
-# 통계
-st.subheader("📊 병원 통계 요약")
+# 요약 통계
+st.subheader("📊 주요 지표")
 col1, col2, col3 = st.columns(3)
-col1.metric("총 병원 수", len(filtered))
-col2.metric("총 병상 수", int(filtered["beds"].sum()))
-col3.metric("총 환자 수", int(filtered["patients"].sum()))
+col1.metric("총 확진자", f"{filtered['Confirmed'].iloc[-1]:,}")
+col2.metric("총 사망자", f"{filtered['Deaths'].iloc[-1]:,}")
+col3.metric("총 회복자", f"{filtered['Recovered'].iloc[-1]:,}")
 
-# 시각화 1: 도시별 병상 수
-st.subheader("🏙️ 도시별 병상 수")
-st.bar_chart(filtered.groupby("city")["beds"].sum())
+# 그래프 1: 확진자 추이
+st.subheader("📈 확진자 추이")
+st.line_chart(filtered.set_index("Date")[["Confirmed"]])
 
-# 시각화 2: 병원 유형별 환자 수
-st.subheader("🧑‍⚕️ 병원 유형별 환자 수")
-st.bar_chart(filtered.groupby("type")["patients"].sum())
+# 그래프 2: 사망자 추이
+st.subheader("☠️ 사망자 추이")
+st.line_chart(filtered.set_index("Date")[["Deaths"]])
 
 # 데이터 미리보기
-st.subheader("📋 병원 데이터 미리보기")
-st.dataframe(filtered)
+st.subheader("📋 데이터 미리보기")
+st.dataframe(filtered.tail(10))
 
