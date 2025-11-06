@@ -123,6 +123,3 @@ st.bar_chart(chart_data.sort_values(by=metric_type, ascending=False))
 st.subheader("📋 원본 데이터 미리보기")
 st.dataframe(latest)
 
-import math
-
-radius = max(5, math.log(val + 1) * 2)
