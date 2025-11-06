@@ -44,4 +44,4 @@ st.line_chart(filtered.set_index("Date")[["Deaths"]])
 st.subheader("📋 데이터 미리보기")
 st.dataframe(filtered.tail(10))
 
-여기에서 좀 더 있어보이게 추가하면?
+
