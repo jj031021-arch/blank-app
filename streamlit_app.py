@@ -23,6 +23,27 @@ df["Date"] = pd.to_datetime(df["Date"])
 start_date = st.sidebar.date_input("시작 날짜", df["Date"].min())
 end_date = st.sidebar.date_input("종료 날짜", df["Date"].max())
 
+import branca.colormap as cm
+
+colormap = cm.linear.YlOrRd_09.scale(latest[metric_type].min(), latest[metric_type].max())
+colormap.caption = "확진자 수"
+
+for _, row in latest.iterrows():
+    region = row["region"]
+    if region in coords:
+        val = int(row[metric_type])
+        folium.CircleMarker(
+            location=coords[region],
+            radius=max(5, math.log(val + 1) * 2),
+            popup=f"{region}: {val:,}",
+            color=colormap(val),
+            fill=True,
+            fill_color=colormap(val),
+            fill_opacity=0.7,
+        ).add_to(m)
+
+m.add_child(colormap)
+
 filtered = df[(df["Date"] >= pd.to_datetime(start_date)) & (df["Date"] <= pd.to_datetime(end_date))]
 
 # 요약 통계
