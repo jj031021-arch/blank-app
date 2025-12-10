@@ -11,17 +11,25 @@ import yfinance as yf
 from datetime import datetime, timedelta
 
 # ---------------------------------------------------------
-# 🚨 파일 이름 설정
+# 🚨 파일 이름 설정 (엑셀 파일명)
 # ---------------------------------------------------------
 CRIME_FILE_NAME = "2023_berlin_crime.xlsx"
 
 # ---------------------------------------------------------
 # 1. 설정 및 API 키
 # ---------------------------------------------------------
-st.set_page_config(layout="wide", page_title="베를린 통합 가이드")
+st.set_page_config(layout="wide", page_title="베를린 통합 가이드 (Google)")
 
 GMAPS_API_KEY = st.secrets.get("google_maps_api_key", "")
 GEMINI_API_KEY = st.secrets.get("gemini_api_key", "")
+
+# 클라이언트 초기화
+gmaps = None
+if GMAPS_API_KEY:
+    try:
+        gmaps = googlemaps.Client(key=GMAPS_API_KEY)
+    except:
+        st.error("Google Maps API 키가 올바르지 않거나 설정되지 않았습니다.")
 
 if GEMINI_API_KEY:
     try:
@@ -80,26 +88,18 @@ def get_weather_forecast():
     except:
         return 15.0, "정보 없음", pd.DataFrame()
 
-# ★ 범죄명 한국어 변환 맵핑 (키워드 매칭용) ★
+# [범죄 데이터] - 번역 맵핑
 def get_crime_translation_map():
     return {
-        'Raub': '강도', 
-        'Straßenraub': '소매치기',
-        'Körper-verletzungen': '상해(전체)',
-        'Gefährl': '중상해',
-        'Freiheits': '협박/스토킹',  # 여기가 핵심 (Freiheits-beraubung...)
-        'Diebstahl -insgesamt-': '절도(전체)',
-        'Kraftwagen': '차량절도',
-        'Kfz': '차량털이',
-        'Fahrrad': '자전거절도',
-        'Wohnraum': '빈집털이',
-        'Branddelikte': '화재범죄',
-        'Brand-stiftung': '방화',
-        'Sach-beschädigung -insgesamt-': '기물파손',
-        'Graffiti': '그래피티',
-        'Rauschgift': '마약범죄',
-        'Straftaten': '총범죄',
-        'Kieztaten': '기타 지역범죄'
+        'Raub': '강도', 'Straßenraub, Handtaschen-raub': '소매치기',
+        'Körper-verletzungen -insgesamt-': '상해(전체)', 'Gefährl. und schwere Körper-verletzung': '중상해',
+        'Freiheits-beraubung, Nötigung, Bedrohung, Nachstellung': '협박/스토킹',
+        'Diebstahl -insgesamt-': '절도(전체)', 'Diebstahl von Kraftwagen': '차량절도',
+        'Diebstahl an/aus Kfz': '차량털이', 'Fahrrad-diebstahl': '자전거절도',
+        'Wohnraum-einbruch': '빈집털이', 'Branddelikte -insgesamt-': '화재범죄',
+        'Brand-stiftung': '방화', 'Sach-beschädigung -insgesamt-': '기물파손',
+        'Sach-beschädigung durch Graffiti': '그래피티', 'Rauschgift-delikte': '마약범죄',
+        'Straftaten -insgesamt-': '총범죄', 'Kieztaten': '기타 지역범죄'
     }
 
 @st.cache_data
@@ -107,14 +107,14 @@ def load_crime_data_excel(file_name):
     try:
         df = pd.read_excel(file_name, skiprows=4, engine='openpyxl')
         
-        # 1. 한국어로 컬럼명 강제 변경 (키워드 포함 여부 확인)
+        # 1. 컬럼명 한국어 강제 변환
         trans_map = get_crime_translation_map()
         new_cols = {}
         for col in df.columns:
-            clean_col = str(col).replace('\n', '').strip() # 줄바꿈 제거
+            clean_col = str(col).replace('\n', '').strip()
             mapped = False
             for k, v in trans_map.items():
-                if k in clean_col: # 키워드가 포함되어 있으면 번역
+                if k in clean_col:
                     new_cols[col] = v
                     mapped = True
                     break
@@ -123,10 +123,8 @@ def load_crime_data_excel(file_name):
                 
         df = df.rename(columns=new_cols)
         
-        # 2. 필수 컬럼 확인
         if 'District' not in df.columns: return pd.DataFrame()
 
-        # 3. 구 이름 필터링
         berlin_districts = [
             "Mitte", "Friedrichshain-Kreuzberg", "Pankow", "Charlottenburg-Wilmersdorf", 
             "Spandau", "Steglitz-Zehlendorf", "Tempelhof-Schöneberg", "Neukölln", 
@@ -134,7 +132,7 @@ def load_crime_data_excel(file_name):
         ]
         df = df[df['District'].isin(berlin_districts)].copy()
 
-        # 4. 숫자 데이터 정제
+        # 숫자 정제
         cols_to_clean = [c for c in df.columns if c != 'District' and 'LOR' not in str(c)]
         for c in cols_to_clean:
             try:
@@ -142,7 +140,6 @@ def load_crime_data_excel(file_name):
                 df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
             except: pass
             
-        # 총범죄 컬럼 확보
         if '총범죄' not in df.columns:
             if 'Total_Crime' in df.columns:
                 df['총범죄'] = df['Total_Crime']
@@ -154,26 +151,31 @@ def load_crime_data_excel(file_name):
     except:
         return pd.DataFrame()
 
+# ★★★ [핵심 변경] Google Places API 사용 ★★★
 @st.cache_data
-def get_google_places(category, lat, lng, radius_m=3000, cuisine_filter=None):
+def get_google_places(category, lat, lng, radius_m=1000, cuisine_filter=None):
     if not gmaps: return []
     
     places_result = []
+    
+    # 1. 검색 키워드 및 타입 설정
     g_type = 'point_of_interest'
     search_keywords = []
 
     if category == 'restaurant':
         g_type = 'restaurant'
+        # 필터에 따른 키워드 생성
         if cuisine_filter and "전체" not in cuisine_filter:
             for cuisine in cuisine_filter:
                 if cuisine == "기타": continue
+                # 한글 필터를 영어 키워드로 변환 (검색 정확도 향상)
                 en_keyword = {
                     "한식": "Korean restaurant", "양식": "Western restaurant", "일식": "Japanese restaurant",
                     "중식": "Chinese restaurant", "아시안": "Asian restaurant", "카페": "Cafe"
                 }.get(cuisine, cuisine)
                 search_keywords.append(en_keyword)
         else:
-            search_keywords.append("")
+            search_keywords.append("") # 전체 검색
             
     elif category == 'hotel':
         g_type = 'lodging'
@@ -183,42 +185,63 @@ def get_google_places(category, lat, lng, radius_m=3000, cuisine_filter=None):
         g_type = 'tourist_attraction'
         search_keywords.append("tourist attraction")
 
+    # 2. Google API 호출 (필터가 여러 개면 반복 호출 후 합침)
     seen_place_ids = set()
+    
     for kw in search_keywords:
         try:
-            res = gmaps.places_nearby(location=(lat, lng), radius=radius_m, type=g_type, keyword=kw if kw else None)
+            # keyword 파라미터가 있으면 type과 함께 사용하여 검색 정밀도 높임
+            res = gmaps.places_nearby(
+                location=(lat, lng),
+                radius=radius_m,
+                type=g_type,
+                keyword=kw if kw else None
+            )
+            
             for place in res.get('results', []):
                 pid = place.get('place_id')
-                if pid in seen_place_ids: continue
+                if pid in seen_place_ids: continue # 중복 제거
                 seen_place_ids.add(pid)
                 
                 name = place.get('name')
                 rating = place.get('rating', 'N/A')
                 
+                # 아이콘/설명 결정
                 desc = "장소"
-                if category == 'restaurant': desc = f"맛집 (⭐{rating})"
-                elif category == 'hotel': desc = f"숙소 (⭐{rating})"
-                elif category == 'tourism': desc = f"관광지 (⭐{rating})"
+                if category == 'restaurant': 
+                    # 구글은 cuisine 태그가 없으므로 검색 키워드나 이름으로 추정하거나 단순 표시
+                    desc = f"맛집 (평점: {rating})"
+                elif category == 'hotel': desc = f"숙소 (평점: {rating})"
+                elif category == 'tourism': desc = f"관광지 (평점: {rating})"
 
+                # 구글 링크
                 search_query = f"{name} Berlin".replace(" ", "+")
                 link = f"https://www.google.com/search?q={search_query}"
 
                 places_result.append({
-                    "name": name, "lat": place['geometry']['location']['lat'], "lng": place['geometry']['location']['lng'],
-                    "type": category, "desc": desc, "link": link
+                    "name": name,
+                    "lat": place['geometry']['location']['lat'],
+                    "lng": place['geometry']['location']['lng'],
+                    "type": category,
+                    "desc": desc,
+                    "link": link
                 })
-        except: continue
+        except Exception:
+            continue
             
     return places_result
 
+# ★★★ [핵심 변경] Google Geocoding API 사용 ★★★
 def search_location_google(query):
     if not gmaps: return None, None, None
     try:
+        # 베를린으로 제한하여 검색
         res = gmaps.geocode(query + ", Berlin")
         if res:
             loc = res[0]['geometry']['location']
             return loc['lat'], loc['lng'], res[0]['formatted_address']
-    except: pass
+    except:
+        pass
     return None, None, None
 
 def get_gemini_response(prompt):
@@ -281,7 +304,7 @@ courses = {
 # 4. UI 구성
 # ---------------------------------------------------------
 st.title("🇩🇪 베를린 통합 여행 가이드")
-st.caption("Google Maps & 2023년 데이터 기반")
+st.caption("Google Maps API & 2023년 데이터 기반")
 
 if 'reviews' not in st.session_state: st.session_state['reviews'] = {}
 if 'recommendations' not in st.session_state: st.session_state['recommendations'] = []
@@ -311,7 +334,7 @@ st.divider()
 st.sidebar.title("🛠️ 여행 도구")
 search_query = st.sidebar.text_input("📍 장소 검색 (이동)", placeholder="예: Kreuzberg")
 if search_query:
-    lat, lng, name = search_location_google(search_query)
+    lat, lng, name = search_location_google(search_query) # Google Search 사용
     if lat:
         st.session_state['map_center'] = [lat, lng]
         st.session_state['search_marker'] = {"lat": lat, "lng": lng, "name": name}
@@ -334,12 +357,13 @@ selected_cuisines = st.sidebar.multiselect("원하는 종류 선택", cuisine_op
 tab1, tab2, tab3, tab4 = st.tabs(["🗺️ 통합 지도", "🚩 추천 코스", "💬 커뮤니티/AI", "📊 범죄 분석"])
 
 # =========================================================
-# TAB 1: 통합 지도
+# TAB 1: 통합 지도 (Google Maps Data)
 # =========================================================
 with tab1:
     center = st.session_state['map_center']
     m = folium.Map(location=center, zoom_start=14)
 
+    # 1. 범죄 데이터 레이어 (엑셀)
     if show_crime:
         crime_df = load_crime_data_excel(CRIME_FILE_NAME)
         if not crime_df.empty:
@@ -349,31 +373,33 @@ with tab1:
                 fill_color="YlOrRd", fill_opacity=0.5, line_opacity=0.2, name="범죄"
             ).add_to(m)
 
+    # 2. 검색 핀
     if st.session_state['search_marker']:
         sm = st.session_state['search_marker']
         folium.Marker([sm['lat'], sm['lng']], popup=sm['name'], icon=folium.Icon(color='red', icon='info-sign')).add_to(m)
 
+    # 3. 장소 마커 (Google Places API)
     if show_food:
-        places = get_google_places('restaurant', center[0], center[1], 3000, selected_cuisines)
+        places = get_google_places('restaurant', center[0], center[1], 1000, selected_cuisines)
         fg_food = folium.FeatureGroup(name="맛집")
         for p in places:
-            html = f"<div style='width:150px'><b>{p['name']}</b><br><span style='color:grey'>{p['desc']}</span><br><a href='{p['link']}' target='_blank'>구글 검색</a></div>"
+            html = f"""<div style='width:150px'><b>{p['name']}</b><br><span style='color:grey'>{p['desc']}</span><br><a href='{p['link']}' target='_blank'>구글 검색</a></div>"""
             folium.Marker([p['lat'], p['lng']], popup=html, icon=folium.Icon(color='green', icon='cutlery', prefix='fa')).add_to(fg_food)
         fg_food.add_to(m)
 
     if show_hotel:
-        places = get_google_places('hotel', center[0], center[1], 3000)
+        places = get_google_places('hotel', center[0], center[1], 1000)
         fg_hotel = folium.FeatureGroup(name="호텔")
         for p in places:
-            html = f"<div style='width:150px'><b>{p['name']}</b><br><span style='color:grey'>{p['desc']}</span><br><a href='{p['link']}' target='_blank'>구글 검색</a></div>"
+            html = f"""<div style='width:150px'><b>{p['name']}</b><br><span style='color:grey'>{p['desc']}</span><br><a href='{p['link']}' target='_blank'>구글 검색</a></div>"""
             folium.Marker([p['lat'], p['lng']], popup=html, icon=folium.Icon(color='blue', icon='bed', prefix='fa')).add_to(fg_hotel)
         fg_hotel.add_to(m)
 
     if show_tour:
-        places = get_google_places('tourism', center[0], center[1], 3000)
+        places = get_google_places('tourism', center[0], center[1], 1000)
         fg_tour = folium.FeatureGroup(name="관광")
         for p in places:
-            html = f"<div style='width:150px'><b>{p['name']}</b><br><span style='color:grey'>{p['desc']}</span><br><a href='{p['link']}' target='_blank'>구글 검색</a></div>"
+            html = f"""<div style='width:150px'><b>{p['name']}</b><br><span style='color:grey'>{p['desc']}</span><br><a href='{p['link']}' target='_blank'>구글 검색</a></div>"""
             folium.Marker([p['lat'], p['lng']], popup=html, icon=folium.Icon(color='purple', icon='camera', prefix='fa')).add_to(fg_tour)
         fg_tour.add_to(m)
 
@@ -492,12 +518,13 @@ with tab4:
         st.subheader("🔍 구별 범죄 TOP 5")
         districts_list = sorted(df_stat['District'].unique())
         selected_district = st.selectbox("지역 선택", districts_list)
-        df_d = df_stat[df_stat['District'] == selected_district]
         
-        crime_cols = [c for c in df_stat.columns if c not in ['District', '총범죄', 'LOR-Schlüssel (Bezirksregion)', 'Total_Crime']]
+        df_d = df_stat[df_stat['District'] == selected_district]
+        crime_cols = [c for c in df_stat.columns if c not in ['District', '총범죄', 'Total_Crime'] and 'LOR' not in c]
         
         if crime_cols:
             d_counts = df_d[crime_cols].sum().sort_values(ascending=False).head(5)
+            
             fig = px.bar(x=d_counts.values, y=d_counts.index, orientation='h', 
                          title=f"{selected_district} 주요 범죄 유형", labels={'x':'건수', 'y':''},
                          color=d_counts.values, color_continuous_scale='Reds')
